@@ -9,10 +9,22 @@ import (
 )
 
 var (
-	enteringChannel = make(chan *User)
-	leavingChannel  = make(chan *User)
-	messageChannel  = make(chan string, 8)
+	enteringChannel            = make(chan *User)
+	leavingChannel             = make(chan *User)
+	messageChannel             = make(chan Message, 8)
+	getUserID       func() int = func() func() int {
+		id := -1
+		return func() int {
+			id++
+			return id
+		}
+	}()
 )
+
+type Message struct {
+	OwnerID int
+	Content string
+}
 
 func main() {
 	listener, err := net.Listen("tcp", ":2020")
@@ -20,7 +32,7 @@ func main() {
 		panic(err)
 	}
 
-	// go broadcaster()
+	go broadcaster()
 
 	for {
 		conn, err := listener.Accept()
@@ -28,7 +40,7 @@ func main() {
 			fmt.Println(err)
 			continue
 		}
-
+		go handleConn(conn)
 	}
 
 }
@@ -57,14 +69,35 @@ func handleConn(conn net.Conn) {
 	defer close(user.MessageChannel)
 	go sendMessage(conn, user.MessageChannel)
 
-	user.MessageChannel <- "Welcome, " + strconv.Itoa(user.ID)
-	messageChannel <- "user: `" + strconv.Itoa(user.ID) + "` has entered"
+	user.MessageChannel <- "Welcome, " + strconv.Itoa(user.ID) + "\n"
+	messageChannel <- Message{
+		OwnerID: user.ID,
+		Content: "user: `" + strconv.Itoa(user.ID) + "` has entered",
+	}
 
 	enteringChannel <- user
 
+	var userActive = make(chan struct{})
+	go func() {
+		d := 5 * time.Second
+		timer := time.NewTimer(d)
+		for {
+			select {
+			case <-timer.C:
+				conn.Close()
+			case <-userActive:
+				timer.Reset(d)
+			}
+		}
+	}()
+
 	input := bufio.NewScanner(conn)
 	for input.Scan() {
-		messageChannel <- strconv.Itoa(user.ID) + ":" + input.Text()
+		messageChannel <- Message{
+			OwnerID: user.ID,
+			Content: strconv.Itoa(user.ID) + ":" + input.Text(),
+		}
+		userActive <- struct{}{}
 	}
 
 	if err := input.Err(); err != nil {
@@ -72,7 +105,10 @@ func handleConn(conn net.Conn) {
 	}
 
 	leavingChannel <- user
-	messageChannel <- "user: `" + strconv.Itoa(user.ID) + "` has left"
+	messageChannel <- Message{
+		OwnerID: user.ID,
+		Content: "user: `" + strconv.Itoa(user.ID) + "` has left",
+	}
 }
 
 func broadcaster() {
@@ -87,7 +123,10 @@ func broadcaster() {
 
 		case msg := <-messageChannel:
 			for user := range users {
-				user.MessageChannel <- msg
+				if user.ID == msg.OwnerID {
+					continue
+				}
+				user.MessageChannel <- msg.Content + "\n"
 			}
 
 		}
